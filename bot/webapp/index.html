@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Объекты</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --bg2: var(--tg-theme-secondary-bg-color, #f2f3f5);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8a8f98);
+    --link: var(--tg-theme-link-color, #2a7de1);
+    --btn: var(--tg-theme-button-color, #2a7de1);
+    --btn-text: var(--tg-theme-button-text-color, #ffffff);
+    --card: var(--tg-theme-section-bg-color, var(--bg));
+    --sep: color-mix(in srgb, var(--hint) 22%, transparent);
+    --soft: color-mix(in srgb, var(--btn) 13%, transparent);
+    --red: #e5484d; --yellow: #f5a524; --green: #30a46c;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg2); color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 12px 16px 40px; }
+  .head { display: flex; justify-content: space-between; align-items: baseline; margin: 4px 2px 12px; gap: 8px; }
+  .head h1 { font-size: 22px; margin: 0; }
+  .muted { color: var(--hint); font-size: 13px; }
+  .chips { display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px 12px; padding: 0 16px; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip { flex: none; border: 0; border-radius: 16px; padding: 7px 12px; background: var(--card); color: var(--text); font: inherit; font-size: 14px; }
+  .chip.on { background: var(--btn); color: var(--btn-text); }
+  .card { background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+  .obj { cursor: pointer; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .dot.red { background: var(--red); } .dot.yellow { background: var(--yellow); } .dot.green { background: var(--green); }
+  .name { font-weight: 600; font-size: 16px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stage { display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 10px; font-size: 13px; background: var(--soft); }
+  .counts { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 13px; color: var(--hint); }
+  .counts b { color: var(--text); font-weight: 600; }
+  .counts .hot b { color: var(--red); }
+  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  .stat { background: var(--card); border-radius: 12px; padding: 10px 8px; text-align: center; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { font-size: 12px; color: var(--hint); }
+  .stat.red b { color: var(--red); } .stat.yellow b { color: var(--yellow); } .stat.green b { color: var(--green); }
+  .back { border: 0; background: none; color: var(--link); font: inherit; padding: 4px 0 10px; }
+  .actions-bar { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
+  .act { border: 0; border-radius: 12px; padding: 11px 10px; background: var(--card); color: var(--text); font: inherit; font-size: 14px; text-align: left; }
+  .search { width: 100%; border: 0; border-radius: 12px; padding: 10px 12px; background: var(--card); color: var(--text); font: inherit; margin-bottom: 10px; outline: none; }
+  .item { padding: 12px 0; border-top: 1px solid var(--sep); }
+  .item:first-child { border-top: 0; padding-top: 2px; }
+  .item-title { font-weight: 600; }
+  .item-meta { font-size: 13px; color: var(--hint); margin-top: 3px; }
+  .item-meta .od { color: var(--red); font-weight: 600; }
+  .tag { font-size: 12px; color: var(--hint); }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; align-items: center; }
+  .actions a { color: var(--link); text-decoration: none; font-size: 14px; }
+  .btn { border: 0; border-radius: 10px; padding: 7px 12px; background: var(--btn); color: var(--btn-text); font: inherit; font-size: 14px; }
+  .btn.ghost { background: var(--soft); color: var(--text); }
+  .btn.wide { width: 100%; padding: 12px; font-size: 15px; }
+  .btn:disabled { opacity: .5; }
+  .empty { color: var(--hint); text-align: center; padding: 28px 8px; }
+  .hist { font-size: 13px; color: var(--hint); margin-top: 8px; }
+  .hist div { padding: 2px 0; }
+  .err { color: var(--red); }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: flex-end; z-index: 10; }
+  .sheet { background: var(--bg); width: 100%; max-width: 640px; margin: 0 auto; border-radius: 18px 18px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); max-height: 88vh; overflow-y: auto; }
+  .sheet h2 { margin: 0 0 12px; font-size: 18px; }
+  .field { display: block; margin-bottom: 12px; }
+  .field span { display: block; font-size: 13px; color: var(--hint); margin-bottom: 4px; }
+  .field input, .field textarea, .field select { width: 100%; border: 0; border-radius: 10px; padding: 10px 12px; background: var(--bg2); color: var(--text); font: inherit; outline: none; }
+  .field textarea { min-height: 84px; resize: vertical; }
+  .sugg { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
+  .sugg .chip { background: var(--bg2); font-size: 13px; padding: 5px 10px; }
+  pre.sheet-text { white-space: pre-wrap; font: inherit; background: var(--bg2); border-radius: 10px; padding: 12px; margin: 0 0 12px; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 12px; font-size: 14px; z-index: 20; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="empty">Загружаю…</div></div>
+<script>
+const tg = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData ? Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+const app = document.getElementById("app");
+let data = null, view = "objects", filter = "all", openId = null, tab = null, query = "";
+
+const STAGES = ["Демонтаж", "Черновая электрика", "Сантехника", "Стяжка / заливка полов", "Штукатурка стен",
+                "Шпаклёвка", "Плитка", "Чистовая отделка", "Сдача объекта"];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body = {}) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initData: tg ? tg.initData : "", ...body }) });
+  if (!r.ok) throw new Error(r.status === 401 ? "Откройте приложение из Telegram" : (await r.text()) || "Ошибка " + r.status);
+  return r.json();
+}
+function toast(t) {
+  const el = document.createElement("div"); el.className = "toast"; el.textContent = t;
+  document.body.appendChild(el); setTimeout(() => el.remove(), 2200);
+}
+function haptic(kind = "success") { tg && tg.HapticFeedback.notificationOccurred(kind); }
+async function act(fn, ok) {
+  try { const r = await fn(); haptic(); if (ok) toast(typeof ok === "function" ? ok(r) : ok); await load(false); }
+  catch (e) { haptic("error"); tg ? tg.showAlert(e.message) : alert(e.message); }
+}
+
+async function load(first = true) {
+  try { data = await api("/api/data"); render(!first); }
+  catch (e) { app.innerHTML = `<div class="empty err">${esc(e.message)}</div>`; }
+}
+
+function counts(c) {
+  const parts = [];
+  if (c.mine) parts.push(`<span>⚡ мои <b>${c.mine}</b></span>`);
+  if (c.overdue) parts.push(`<span class="hot">⏰ просрочено <b>${c.overdue}</b></span>`);
+  if (c.problems) parts.push(`<span>⚠️ проблемы <b>${c.problems}</b></span>`);
+  if (c.disputed) parts.push(`<span class="hot">🔴 спорное <b>${c.disputed}</b></span>`);
+  if (c.pending) parts.push(`<span>🟡 ждут клиента <b>${c.pending}</b></span>`);
+  if (c.questions) parts.push(`<span>❓ вопросы <b>${c.questions}</b></span>`);
+  parts.push(`<span>задач <b>${c.tasks}</b></span>`);
+  return parts.join("");
+}
+
+/* ---------- главная ---------- */
+
+function renderHome() {
+  const objs0 = data.objects;
+  const by = l => objs0.filter(o => o.light === l).length;
+  const myAll = objs0.flatMap(o => o.mine.map(t => ({ ...t, obj: o.name, objId: o.id })))
+    .sort((a, b) => (b.overdue - a.overdue) || String(a.due || "9").localeCompare(String(b.due || "9")));
+  const views = [["objects", "Объекты"], ["mine", `Мои задачи ${myAll.length}`]];
+  let body = "";
+  if (view === "mine") {
+    body = myAll.length ? `<div class="card">${myAll.map(t => item(t, true)).join("")}</div>`
+                        : `<div class="empty">На вас нет открытых задач 👌</div>`;
+  } else {
+    let objs = objs0;
+    if (filter === "hot") objs = objs.filter(o => o.light !== "green");
+    if (query) objs = objs.filter(o => (o.name + " " + (o.address || "") + " " + (o.stage || "")).toLowerCase().includes(query));
+    body = `
+      ${data.user.manager ? `<div class="summary">
+        <div class="stat red"><b>${by("red")}</b><span>внимание</span></div>
+        <div class="stat yellow"><b>${by("yellow")}</b><span>ждут</span></div>
+        <div class="stat green"><b>${by("green")}</b><span>спокойно</span></div>
+        <div class="stat"><b>${objs0.reduce((s, o) => s + o.counts.overdue, 0)}</b><span>просрочено</span></div>
+      </div>` : ""}
+      <input class="search" id="q" placeholder="Поиск объекта" value="${esc(query)}">
+      <div class="chips">${[["all", `Все ${objs0.length}`], ["hot", "Требуют внимания"]]
+        .map(([k, t]) => `<button class="chip ${filter === k ? "on" : ""}" data-f="${k}">${t}</button>`).join("")}</div>
+      ${objs.length ? objs.map(o => `
+        <div class="card obj" data-id="${o.id}">
+          <div class="row"><span class="dot ${o.light}"></span><span class="name">${esc(o.name)}</span></div>
+          ${o.address ? `<div class="muted">📍 ${esc(o.address)}</div>` : ""}
+          <span class="stage">🏗&nbsp;${esc(o.stage || "этап не указан")}</span>
+          <div class="counts">${counts(o.counts)}</div>
+        </div>`).join("") : `<div class="empty">Ничего не нашлось</div>`}`;
+  }
+  app.innerHTML = `
+    <div class="head"><h1>Объекты</h1><span class="muted">${data.user.manager ? "руководитель" : esc(data.user.name)} · ${esc(data.generated)}</span></div>
+    <div class="chips">${views.map(([k, t]) => `<button class="chip ${view === k ? "on" : ""}" data-v="${k}">${t}</button>`).join("")}</div>
+    ${body}`;
+  app.querySelectorAll("[data-v]").forEach(b => b.onclick = () => { view = b.dataset.v; render(); });
+  app.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { filter = b.dataset.f; render(); });
+  app.querySelectorAll(".obj").forEach(c => c.onclick = () => { openId = +c.dataset.id; tab = null; query = ""; render(); });
+  const q = document.getElementById("q");
+  if (q) q.oninput = () => { query = q.value.trim().toLowerCase(); const pos = q.selectionStart; render(true); const n = document.getElementById("q"); n.focus(); n.setSelectionRange(pos, pos); };
+  bindItems();
+}
+
+/* ---------- элемент списка ---------- */
+
+function item(r, withObj = false) {
+  const meta = [];
+  if (r.type === "task") {
+    meta.push(r.overdue ? `<span class="od">${esc(r.status)}</span>` : esc(r.status));
+    if (r.assignee) meta.push("👤 " + esc(r.assignee));
+    if (r.due) meta.push("⏰ " + esc(r.due));
+  } else if (r.type === "agreement") {
+    meta.push(r.conf === "🟢" ? "подтверждено клиентом" : r.conf === "🔴" ? "спорно" : "со слов сотрудника");
+  } else if (r.status && r.type !== "stage") meta.push(esc(r.status));
+  if (r.author) meta.push(`${r.source || ""} ${esc(r.author)}, ${esc(r.date)}`);
+  const btns = [];
+  if (r.can_done) btns.push(`<button class="btn" data-done="${r.id}">✅ Выполнено</button>`);
+  if (r.can_close) btns.push(`<button class="btn ghost" data-close="${r.id}">Закрыть</button>`);
+  if (r.can_confirm && data.user.manager) btns.push(`<button class="btn" data-agree="${r.id}" data-a="confirm">🟢 Подтвердить</button>
+                                                     <button class="btn ghost" data-agree="${r.id}" data-a="reject">Отклонить</button>`);
+  if (r.link) btns.push(`<a href="#" data-link="${esc(r.link)}">Открыть в чате ↗</a>`);
+  return `<div class="item">
+    ${withObj ? `<div class="tag">${esc(r.obj)}</div>` : ""}
+    ${view === "feed-tag" ? "" : ""}
+    <div class="item-title">${r.icon || ""} ${esc(r.title)}</div>
+    ${r.value && r.value !== r.title ? `<div>${esc(r.value)}</div>` : ""}
+    <div class="item-meta">${meta.join(" · ")}</div>
+    ${r.note ? `<div class="item-meta">📝 ${esc(r.note)}</div>` : ""}
+    ${btns.length ? `<div class="actions">${btns.join("")}</div>` : ""}
+  </div>`;
+}
+
+function bindItems() {
+  app.querySelectorAll("[data-link]").forEach(a => a.onclick = e => {
+    e.preventDefault(); tg ? tg.openTelegramLink(a.dataset.link) : window.open(a.dataset.link);
+  });
+  app.querySelectorAll("[data-done]").forEach(b => b.onclick = () => { b.disabled = true; act(() => api("/api/done", { id: +b.dataset.done }), "Задача выполнена"); });
+  app.querySelectorAll("[data-close]").forEach(b => b.onclick = () => { b.disabled = true; act(() => api("/api/close", { id: +b.dataset.close }), "Закрыто"); });
+  app.querySelectorAll("[data-agree]").forEach(b => b.onclick = () => {
+    b.disabled = true;
+    act(() => api("/api/agreement", { id: +b.dataset.agree, action: b.dataset.a }), b.dataset.a === "confirm" ? "Подтверждено 🟢" : "Отклонено");
+  });
+}
+
+/* ---------- объект ---------- */
+
+function renderObject(o) {
+  const tabs = [["mine", "Мои", o.mine], ["tasks", "Задачи", o.tasks], ["problems", "Проблемы", o.problems],
+                ["agreements", "Договорённости", o.agreements], ["questions", "Вопросы", o.questions], ["feed", "Лента", o.feed]]
+    .filter(([k, , list]) => list.length || k === "tasks" || k === "feed");
+  if (!tab || !tabs.some(t => t[0] === tab)) tab = (o.mine.length ? "mine" : "tasks");
+  let list = o[tab] || [];
+  if (query) list = list.filter(r => [r.title, r.value, r.assignee, r.author, r.note].join(" ").toLowerCase().includes(query));
+  const pending = o.agreements.filter(a => a.conf === "🟡");
+  app.innerHTML = `
+    ${tg ? "" : `<button class="back" id="back">‹ Объекты</button>`}
+    <div class="card">
+      <div class="row"><span class="dot ${o.light}"></span><span class="name">${esc(o.name)}</span></div>
+      ${o.address ? `<div class="muted">📍 ${esc(o.address)}</div>` : ""}
+      ${o.description ? `<div class="muted">🏠 ${esc(o.description)}</div>` : ""}
+      <span class="stage">🏗&nbsp;${esc(o.stage || "этап не указан")}${o.stage_since ? ` · с ${esc(o.stage_since)}, ${esc(o.stage_by)}` : ""}</span>
+      ${o.stage_history.length > 1 ? `<div class="hist">${o.stage_history.slice(1).map(h => `<div>${esc(h.date)} — ${esc(h.stage)} (${esc(h.by)})</div>`).join("")}</div>` : ""}
+      <div class="counts">${counts(o.counts)}</div>
+      ${o.last_activity ? `<div class="muted" style="margin-top:6px">Последнее сообщение в чате: ${esc(o.last_activity)}</div>` : ""}
+    </div>
+    <div class="actions-bar">
+      <button class="act" id="a-task">➕ Новая задача</button>
+      <button class="act" id="a-stage">🏗 Сменить этап</button>
+      <button class="act" id="a-sheet">📝 Лист согласования${pending.length ? ` · ${pending.length}` : ""}</button>
+      ${data.user.manager ? `<button class="act" id="a-profile">✏️ Профиль объекта</button>` : `<button class="act" id="a-copy">📋 Сводка текстом</button>`}
+    </div>
+    <input class="search" id="q" placeholder="Поиск по записям объекта" value="${esc(query)}">
+    <div class="chips">${tabs.map(([k, t, l]) => `<button class="chip ${tab === k ? "on" : ""}" data-t="${k}">${t} ${l.length}</button>`).join("")}</div>
+    <div class="card">${list.length ? list.map(r => item(r)).join("") : `<div class="empty">${query ? "Ничего не нашлось" : "Пусто"}</div>`}</div>`;
+  app.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+  const q = document.getElementById("q");
+  q.oninput = () => { query = q.value.trim().toLowerCase(); const pos = q.selectionStart; render(true); const n = document.getElementById("q"); n.focus(); n.setSelectionRange(pos, pos); };
+  document.getElementById("a-task").onclick = () => taskSheet(o);
+  document.getElementById("a-stage").onclick = () => stageSheet(o);
+  document.getElementById("a-sheet").onclick = () => approvalSheet(o, pending);
+  const p = document.getElementById("a-profile"); if (p) p.onclick = () => profileSheet(o);
+  const c = document.getElementById("a-copy"); if (c) c.onclick = () => textSheet("Сводка по объекту", summaryText(o));
+  const back = document.getElementById("back"); if (back) back.onclick = goBack;
+  bindItems();
+}
+
+/* ---------- шторки ---------- */
+
+function sheet(html, onReady) {
+  const bg = document.createElement("div"); bg.className = "sheet-bg";
+  bg.innerHTML = `<div class="sheet">${html}</div>`;
+  bg.onclick = e => { if (e.target === bg) close(); };
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  onReady(bg.querySelector(".sheet"), close);
+}
+
+function taskSheet(o) {
+  sheet(`<h2>Новая задача · ${esc(o.name)}</h2>
+    <label class="field"><span>Что сделать</span><textarea id="t-title" placeholder="Заказать 4 машины бетона М300"></textarea></label>
+    <label class="field"><span>Исполнитель</span><select id="t-who">
+      <option value="">Без исполнителя</option>
+      ${(data.employees || []).map(e => `<option value="${e.id}">${esc(e.fio)}${e.username ? " · @" + esc(e.username) : ""}</option>`).join("")}
+    </select></label>
+    ${(data.employees || []).length ? "" : `<div class="muted" style="margin:-6px 0 12px">Сотрудники появятся здесь, когда напишут боту /start и укажут ФИО.</div>`}
+    <label class="field"><span>Срок (необязательно)</span><input id="t-due" type="datetime-local"></label>
+    <button class="btn wide" id="t-save">Создать — карточка появится в чате объекта</button>`, (el, close) => {
+    el.querySelector("#t-title").focus();
+    el.querySelector("#t-save").onclick = () => {
+      const title = el.querySelector("#t-title").value.trim();
+      if (!title) return el.querySelector("#t-title").focus();
+      close();
+      act(() => api("/api/task", { object_id: o.id, title, assignee_id: el.querySelector("#t-who").value || null, due: el.querySelector("#t-due").value }),
+          r => r.duplicate ? "Такая задача уже есть — дополнил её" : "Задача создана");
+    };
+  });
+}
+
+function stageSheet(o) {
+  sheet(`<h2>Этап объекта</h2>
+    <label class="field"><span>Сейчас: ${esc(o.stage || "не указан")}</span><input id="s-val" placeholder="Например: Штукатурка стен"></label>
+    <div class="sugg">${STAGES.map(s => `<button class="chip" data-s="${esc(s)}">${esc(s)}</button>`).join("")}</div>
+    <button class="btn wide" id="s-save">Сменить этап</button>`, (el, close) => {
+    const inp = el.querySelector("#s-val");
+    el.querySelectorAll("[data-s]").forEach(b => b.onclick = () => { inp.value = b.dataset.s; });
+    el.querySelector("#s-save").onclick = () => {
+      const stage = inp.value.trim(); if (!stage) return inp.focus();
+      close(); act(() => api("/api/stage", { object_id: o.id, stage }), "Этап обновлён — бригада увидит в чате");
+    };
+  });
+}
+
+function profileSheet(o) {
+  sheet(`<h2>Профиль объекта</h2>
+    <label class="field"><span>Адрес</span><input id="p-addr" value="${esc(o.address || "")}"></label>
+    <label class="field"><span>Что за объект</span><textarea id="p-desc">${esc(o.description || "")}</textarea></label>
+    <button class="btn wide" id="p-save">Сохранить</button>`, (el, close) => {
+    el.querySelector("#p-save").onclick = () => {
+      close(); act(() => api("/api/profile", { object_id: o.id, address: el.querySelector("#p-addr").value, description: el.querySelector("#p-desc").value }), "Сохранено");
+    };
+  });
+}
+
+function approvalText(o, pending) {
+  const lines = pending.map((a, i) => `${i + 1}. ${a.title}${a.value && a.value !== a.title ? " — " + a.value : ""}`);
+  return `Здравствуйте! Это бригада по объекту «${o.name}»${o.address ? " (" + o.address + ")" : ""}.\n` +
+    `Подтвердите, пожалуйста, что всё верно:\n\n${lines.join("\n")}\n\n` +
+    `Ответьте «Да, всё верно» или напишите, что поправить. Спасибо!`;
+}
+
+function approvalSheet(o, pending) {
+  if (!pending.length) return textSheet("Лист согласования", "Все договорённости по объекту уже подтверждены клиентом 🟢");
+  // бот запоминает пункты листа — по пересланному ответу клиента сам переведёт их в 🟢
+  api("/api/approval", { object_id: o.id, ids: pending.map(a => a.id) }).catch(() => {});
+  textSheet("Лист согласования для клиента", approvalText(o, pending),
+    "Отправьте клиенту, а его ответ перешлите (или скриншот переписки) в чат объекта — бот сам переведёт договорённости в 🟢.");
+}
+
+function summaryText(o) {
+  const t = o.tasks.map(x => `• ${x.title}${x.assignee ? " — " + x.assignee : ""}${x.due ? ", до " + x.due : ""}`).join("\n") || "—";
+  const p = o.problems.map(x => `• ${x.title}`).join("\n") || "—";
+  return `${o.name}\nЭтап: ${o.stage || "не указан"}\n\nЗадачи:\n${t}\n\nПроблемы:\n${p}`;
+}
+
+function textSheet(title, text, hint = "") {
+  sheet(`<h2>${esc(title)}</h2>${hint ? `<div class="muted" style="margin-bottom:10px">${esc(hint)}</div>` : ""}
+    <pre class="sheet-text">${esc(text)}</pre>
+    <div class="actions-bar"><button class="btn wide" id="x-copy">Скопировать</button><button class="btn wide ghost" id="x-share">Переслать в Telegram</button></div>`,
+    (el, close) => {
+      el.querySelector("#x-copy").onclick = async () => {
+        try { await navigator.clipboard.writeText(text); toast("Скопировано"); haptic(); } catch { toast("Не удалось скопировать — выделите текст"); }
+      };
+      el.querySelector("#x-share").onclick = () => {
+        const url = "https://t.me/share/url?url=%20&text=" + encodeURIComponent(text);
+        tg ? tg.openTelegramLink(url) : window.open(url);
+      };
+    });
+}
+
+/* ---------- навигация ---------- */
+
+function goBack() { openId = null; query = ""; render(); }
+if (tg) tg.BackButton.onClick(goBack);
+
+function render(keepScroll = false) {
+  const o = openId && data.objects.find(x => x.id === openId);
+  if (tg) o ? tg.BackButton.show() : tg.BackButton.hide();
+  const y = window.scrollY;
+  o ? renderObject(o) : renderHome();
+  window.scrollTo(0, keepScroll ? y : 0);
+}
+load();
+</script>
+</body>
+</html>

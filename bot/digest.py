@@ -39,15 +39,20 @@ async def build_digest() -> str:
                     now - datetime.fromisoformat(r["created_at"]) > timedelta(hours=QUESTION_STALE_HOURS):
                 blocks["❓ Вопросы без ответа"].append(line)
 
-        last = await db.fetchone("SELECT MAX(date) AS d FROM messages WHERE chat_id = ?", obj["chat_id"])
+        last = await db.fetchone("SELECT MAX(date) AS d FROM messages WHERE chat_id = ? AND COALESCE(thread_id, 0) = ?",
+                                 obj["chat_id"], obj["thread_id"])
         if not last["d"] or now - datetime.fromisoformat(last["d"]) > timedelta(days=QUIET_DAYS):
             blocks["💤 Тихие объекты"].append(f"[{esc(obj['name'])}] нет сообщений {QUIET_DAYS}+ дня")
 
+    stage_lines = [f"• {esc(o['name'])}: {esc(o['stage']) if o.get('stage') else 'этап не указан'}"
+                   for o in await db.all_objects()]
     parts = [f"📊 <b>Сводка на {datetime.now(config.tz):%d.%m}</b>"]
+    if stage_lines:
+        parts.append("\n<b>🏗 Этапы объектов</b>\n" + "\n".join(stage_lines))
     for title, lines in blocks.items():
         if lines:
             parts.append(f"\n<b>{title} ({len(lines)})</b>\n" + "\n".join(lines[:15]))
-    if len(parts) == 1:
+    if not any(blocks.values()):
         parts.append("\nВсё спокойно 👌")
     return "\n".join(parts)
 
@@ -59,11 +64,12 @@ async def build_brief(obj: dict) -> str:
         by_type.setdefault(r["type"], []).append(record_line(r))
     titles = {"agreement": "📌 Договорённости", "task": "🛠 Задачи",
               "problem": "⚠️ Проблемы", "question": "❓ Открытые вопросы"}
-    parts = [f"<b>{esc(obj['name'])} — кратко</b>"]
+    from .stages import line as stage_line
+    parts = [f"<b>{esc(obj['name'])} — кратко</b>", stage_line(await db.current_stage(obj["id"]))]
     for t, title in titles.items():
         if by_type.get(t):
             parts.append(f"\n<b>{title}</b>\n" + "\n".join(by_type[t]))
-    if len(parts) == 1:
+    if len(parts) == 2:
         parts.append("Пока ничего не зафиксировано.")
     return "\n".join(parts)
 

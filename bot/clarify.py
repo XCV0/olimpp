@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 
-from . import db, llm
+from . import db, llm, notify
 from .formatting import esc, message_for_llm, record_for_llm
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ async def ask(bot: Bot, *, chat_id: int, object_id: int, source_message_id: int,
               question: str, record_id: int | None = None, kind: str = "record") -> bool:
     """Задаёт вопрос в чате. False — если лимит открытых вопросов исчерпан."""
     open_count = await db.fetchone(
-        "SELECT COUNT(*) AS n FROM clarifications WHERE chat_id = ? AND status = 'open'", chat_id
+        "SELECT COUNT(*) AS n FROM clarifications WHERE object_id = ? AND status = 'open'", object_id
     )
     if open_count["n"] >= MAX_OPEN_PER_CHAT:
         if record_id:
@@ -61,8 +61,9 @@ async def ask(bot: Bot, *, chat_id: int, object_id: int, source_message_id: int,
         chat_id, object_id, record_id, kind, question, source_message_id, author_id, _now(),
     )
     try:
+        obj = await db.get_object(object_id)
         sent = await bot.send_message(
-            chat_id, f"❓ {esc(question)}",
+            chat_id, f"❓ {esc(question)}", **notify.thread_kw(obj),
             reply_parameters=ReplyParameters(message_id=source_message_id, allow_sending_without_reply=True),
             reply_markup=_skip_kb(clar_id),
         )
@@ -77,18 +78,23 @@ async def ask(bot: Bot, *, chat_id: int, object_id: int, source_message_id: int,
     return True
 
 
-async def find_for_answer(msg: dict) -> dict | None:
+async def find_for_answer(msg: dict, object_id: int | None = None) -> dict | None:
     """Открытый вопрос, на который похоже отвечает это сообщение."""
+    # черновики (kind=draft) разбирает modes — сюда они не попадают
     if msg["reply_to"]:
         return await db.fetchone(
-            "SELECT * FROM clarifications WHERE chat_id = ? AND ask_message_id = ? AND status = 'open'",
+            "SELECT * FROM clarifications WHERE chat_id = ? AND ask_message_id = ? AND status = 'open' "
+            "AND kind != 'draft'",
             msg["chat_id"], msg["reply_to"],
         )
     since = (datetime.fromisoformat(msg["date"]) - ANSWER_WINDOW).isoformat()
     return await db.fetchone(
+        # без реплая — только вопрос по этому же объекту (топику), иначе ответы перепутаются
         "SELECT * FROM clarifications WHERE chat_id = ? AND author_id = ? AND status = 'open' "
-        "AND created_at >= ? ORDER BY id DESC LIMIT 1",
-        msg["chat_id"], msg["user_id"], since,
+        # профиль объекта — только реплаем: иначе любое следующее сообщение руководителя «съедается» как адрес
+        "AND kind NOT IN ('draft', 'stage', 'approval', 'object') AND created_at >= ? AND object_id = COALESCE(?, object_id) "
+        "ORDER BY id DESC LIMIT 1",
+        msg["chat_id"], msg["user_id"], since, object_id,
     )
 
 

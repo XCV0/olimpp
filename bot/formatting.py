@@ -8,14 +8,17 @@ CONF_ICON = {"confirmed": "🟢", "reported": "🟡", "discussion": "⚪", "conf
 TYPE_NAME = {"agreement": "Договорённость", "task": "Задача", "problem": "Проблема", "question": "Вопрос"}
 # у задач, проблем и вопросов значок показывает статус, у договорённостей — достоверность
 STATUS_ICON = {
-    "task": {"done": "✅", "accepted": "🔵", "open": "⚪"},
+    "task": {"done": "✅", "accepted": "🔵", "open": "⚪", "cancelled": "✖️"},
     "problem": {"open": "⚠️", "closed": "✅"},
     "question": {"open": "❓", "closed": "✅"},
 }
 STATUS_NAME = {
-    "done": "выполнена", "accepted": "в работе", "open": "открыта", "closed": "закрыта",
+    "done": "выполнена", "accepted": "в работе", "cancelled": "отменена", "open": "открыта", "closed": "закрыта",
     "active": "актуальна", "superseded": "заменена", "rejected": "отклонена", "disputed": "спорная",
 }
+# откуда запись: человек явно зафиксировал через @бота или бот сам заметил в переписке
+SOURCE_MARK = {"tag": "✍️", "stream": "👁"}
+SOURCE_NAME = {"tag": "зафиксировано человеком", "stream": "замечено ботом в переписке"}
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
@@ -29,8 +32,14 @@ def msg_link(chat_id: int, message_id: int) -> str | None:
 
 
 def link(r: dict, text: str = "сообщение") -> str:
+    """Ссылка на исходное сообщение. r — запись, сообщение или этап: у всех есть chat_id и message_id.
+    В обычной группе ссылок нет: для записи даём /src_N (бот покажет оригинал), для остального — номер сообщения."""
     url = msg_link(r["chat_id"], r["message_id"])
-    return f'<a href="{url}">{text}</a>' if url else f"📎 /src_{r['id']}"
+    if url:
+        return f'<a href="{url}">{text}</a>'
+    if "type" in r and "id" in r:  # запись из records
+        return f"📎 /src_{r['id']}"
+    return f"📎 сообщение №{r['message_id']}"
 
 
 def esc(s: str | None) -> str:
@@ -70,7 +79,8 @@ def record_line(r: dict, with_object: str | None = None) -> str:
         parts.append(f"👤 {esc(r['assignee'])}")
     if r.get("due_date"):
         parts.append(f"⏰ {r['due_date']}")
-    meta = f"{esc(r['author_name'])}, {short_date(r['created_at'])} · {link(r)}"
+    src = SOURCE_MARK.get(r.get("source") or "stream", "")
+    meta = f"{src} {esc(r['author_name'])}, {short_date(r['created_at'])} · {link(r)}"
     prefix = f"[{esc(with_object)}] " if with_object else ""
     return f"{prefix}{' · '.join(parts)}\n   <i>{meta}</i>"
 
@@ -80,13 +90,16 @@ def record_for_llm(r: dict) -> str:
     bits = [
         f"#{r['id']}", f"значок={icon(r)}", r["type"], f"тема={r['topic_key'] or '-'}",
         f"статус={status_text(r)}",
-        f"достоверность={r['confidence']}", f"«{r['title']}: {r['value']}»",
+        f"достоверность={r['confidence']}", f"источник={SOURCE_NAME.get(r.get('source') or 'stream')}",
+        f"«{r['title']}: {r['value']}»",
         f"автор={r['author_name']}", f"дата={r['created_at'][:16]}",
     ]
     if r.get("assignee"):
         bits.append(f"исполнитель={r['assignee']}")
     if r.get("due_date"):
         bits.append(f"срок={r['due_date']}")
+    if r.get("details"):
+        bits.append(f"детали={r['details']}")
     if r.get("note"):
         bits.append(f"пометка={r['note']}")
     return " | ".join(bits)
@@ -121,4 +134,4 @@ def linkify_ids(text: str, records: dict[int, dict]) -> tuple[str, list[int]]:
 
 def object_for_llm(obj: dict) -> str:
     return (f"название={obj['name']} | адрес={obj.get('address') or 'не указан'} | "
-            f"описание={obj.get('description') or 'не указано'}")
+            f"описание={obj.get('description') or 'не указано'} | текущий этап={obj.get('stage') or 'не указан'}")

@@ -6,12 +6,30 @@ import aiosqlite
 from .config import config
 
 SCHEMA = """
+-- объект = чат компании + топик (thread_id); 0 — обычный чат без топиков
 CREATE TABLE IF NOT EXISTS objects (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    chat_id INTEGER UNIQUE NOT NULL,
+    chat_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL DEFAULT 0,
     address TEXT,
-    description TEXT          -- что за объект: квартира/дом/офис, какие работы, клиент
+    description TEXT,         -- что за объект: квартира/дом/офис, какие работы, клиент
+    stage TEXT,
+    UNIQUE (chat_id, thread_id)
+);
+-- чат компании: в какой топик бот публикует статусы объектов
+CREATE TABLE IF NOT EXISTS company_chats (
+    chat_id INTEGER PRIMARY KEY,
+    status_thread_id INTEGER
+);
+-- история этапов объекта («заливаем полы», «штукатурка», «сдан»)
+CREATE TABLE IF NOT EXISTS object_stages (
+    id INTEGER PRIMARY KEY,
+    object_id INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    user_id INTEGER, user_name TEXT,
+    chat_id INTEGER, message_id INTEGER,
+    created_at TEXT
 );
 -- вопросы бота в чате, когда человеку не хватило данных
 CREATE TABLE IF NOT EXISTS clarifications (
@@ -75,10 +93,34 @@ async def connect() -> None:
     _db = await aiosqlite.connect(config.db_path)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
-    # миграция баз, созданных до появления профиля объекта
-    for col in ("address", "description"):
+    # objects до топиков: chat_id был UNIQUE — пересобираем таблицу с ключом (chat_id, thread_id)
+    cols = [r[1] for r in await (await _db.execute("PRAGMA table_info(objects)")).fetchall()]
+    if "thread_id" not in cols:
+        for col in ("address", "description", "stage"):
+            if col not in cols:
+                await _db.execute(f"ALTER TABLE objects ADD COLUMN {col} TEXT")
+        await _db.executescript("""
+            CREATE TABLE objects_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL, chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0, address TEXT, description TEXT, stage TEXT,
+                UNIQUE (chat_id, thread_id));
+            INSERT INTO objects_new (id, name, chat_id, thread_id, address, description, stage)
+                SELECT id, name, chat_id, 0, address, description, stage FROM objects;
+            DROP TABLE objects;
+            ALTER TABLE objects_new RENAME TO objects;
+        """)
+    for table, col, kind in (("messages", "thread_id", "INTEGER DEFAULT 0"), ("users", "fio", "TEXT"),
+                             ("users", "awaiting_fio", "INTEGER DEFAULT 0")):
         try:
-            await _db.execute(f"ALTER TABLE objects ADD COLUMN {col} TEXT")
+            await _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+        except aiosqlite.OperationalError:
+            pass
+    # миграции баз, созданных до появления новых полей
+    for table, col in (("objects", "address"), ("objects", "description"), ("objects", "stage"), ("users", "username"),
+                       ("records", "source"), ("records", "details"), ("records", "assignee_user_id"),
+                       ("records", "card_message_id"),
+                       ("clarifications", "payload")):
+        try:
+            await _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         except aiosqlite.OperationalError:
             pass
     await _db.commit()
@@ -113,16 +155,37 @@ async def execute(sql: str, *args) -> int:
 
 # --- объекты и пользователи ---
 
-async def bind_chat(chat_id: int, name: str) -> None:
+async def bind_chat(chat_id: int, name: str, thread_id: int = 0) -> None:
     await execute(
-        "INSERT INTO objects (name, chat_id) VALUES (?, ?) "
-        "ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name",
-        name, chat_id,
+        "INSERT INTO objects (name, chat_id, thread_id) VALUES (?, ?, ?) "
+        "ON CONFLICT(chat_id, thread_id) DO UPDATE SET name = excluded.name",
+        name, chat_id, thread_id,
     )
 
 
-async def object_by_chat(chat_id: int) -> dict | None:
-    return await fetchone("SELECT * FROM objects WHERE chat_id = ?", chat_id)
+async def object_by_chat(chat_id: int, thread_id: int = 0) -> dict | None:
+    return await fetchone("SELECT * FROM objects WHERE chat_id = ? AND thread_id = ?", chat_id, thread_id)
+
+
+async def set_status_thread(chat_id: int, thread_id: int) -> None:
+    await execute(
+        "INSERT INTO company_chats (chat_id, status_thread_id) VALUES (?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET status_thread_id = excluded.status_thread_id", chat_id, thread_id,
+    )
+
+
+async def status_thread(chat_id: int) -> int | None:
+    row = await fetchone("SELECT status_thread_id FROM company_chats WHERE chat_id = ?", chat_id)
+    return row["status_thread_id"] if row else None
+
+
+async def get_user(user_id: int) -> dict | None:
+    return await fetchone("SELECT * FROM users WHERE user_id = ?", user_id)
+
+
+async def employees() -> list[dict]:
+    """Сотрудники с ФИО — по ним ставят задачи «по имени-отчеству»."""
+    return await fetchall("SELECT * FROM users WHERE fio IS NOT NULL AND fio != '' ORDER BY fio")
 
 
 async def update_object(object_id: int, **fields) -> None:
@@ -134,17 +197,43 @@ async def get_object(object_id: int) -> dict | None:
     return await fetchone("SELECT * FROM objects WHERE id = ?", object_id)
 
 
+async def set_stage(object_id: int, stage: str, user_id: int, user_name: str,
+                    chat_id: int, message_id: int, at: str) -> dict | None:
+    """Меняет этап объекта и пишет историю. Возвращает предыдущий этап (или None)."""
+    prev = await current_stage(object_id)
+    await execute(
+        "INSERT INTO object_stages (object_id, stage, user_id, user_name, chat_id, message_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)", object_id, stage, user_id, user_name, chat_id, message_id, at,
+    )
+    await execute("UPDATE objects SET stage = ? WHERE id = ?", stage, object_id)  # для контекста LLM
+    return prev
+
+
+async def current_stage(object_id: int) -> dict | None:
+    return await fetchone("SELECT * FROM object_stages WHERE object_id = ? ORDER BY id DESC LIMIT 1", object_id)
+
+
+async def stage_history(object_id: int, limit: int = 10) -> list[dict]:
+    return await fetchall(
+        "SELECT * FROM object_stages WHERE object_id = ? ORDER BY id DESC LIMIT ?", object_id, limit
+    )
+
+
 async def all_objects() -> list[dict]:
     return await fetchall("SELECT * FROM objects ORDER BY name")
 
 
-async def upsert_user(user_id: int, name: str, started: bool = False) -> None:
+async def upsert_user(user_id: int, name: str, started: bool = False, username: str | None = None) -> None:
     await execute(
-        "INSERT INTO users (user_id, name, started) VALUES (?, ?, ?) "
+        "INSERT INTO users (user_id, name, started, username) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, "
-        "started = MAX(started, excluded.started)",
-        user_id, name, int(started),
+        "started = MAX(started, excluded.started), username = COALESCE(excluded.username, username)",
+        user_id, name, int(started), (username or "").lower() or None,
     )
+
+
+async def user_by_username(username: str) -> dict | None:
+    return await fetchone("SELECT * FROM users WHERE username = ?", username.lstrip("@").lower())
 
 
 async def is_manager(user_id: int) -> bool:
@@ -172,9 +261,9 @@ async def make_manager_if_none(user_id: int) -> bool:
 async def save_message(m: dict) -> None:
     await execute(
         "INSERT OR REPLACE INTO messages (chat_id, message_id, user_id, user_name, date, text, kind, "
-        "file_id, forward_from, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "file_id, forward_from, reply_to, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         m["chat_id"], m["message_id"], m["user_id"], m["user_name"], m["date"], m["text"],
-        m["kind"], m["file_id"], m["forward_from"], m["reply_to"],
+        m["kind"], m["file_id"], m["forward_from"], m["reply_to"], m.get("thread_id") or 0,
     )
 
 
@@ -184,9 +273,11 @@ async def get_message(chat_id: int, message_id: int) -> dict | None:
     )
 
 
-async def recent_messages(chat_id: int, limit: int = 20) -> list[dict]:
+async def recent_messages(chat_id: int, limit: int = 20, thread_id: int = 0) -> list[dict]:
+    # только свой топик: контекст одного объекта не должен утекать в разбор другого
     rows = await fetchall(
-        "SELECT * FROM messages WHERE chat_id = ? ORDER BY message_id DESC LIMIT ?", chat_id, limit
+        "SELECT * FROM messages WHERE chat_id = ? AND COALESCE(thread_id, 0) = ? ORDER BY message_id DESC LIMIT ?",
+        chat_id, thread_id, limit,
     )
     return rows[::-1]
 
@@ -226,7 +317,7 @@ async def active_agreement(object_id: int, topic_key: str) -> dict | None:
 
 
 async def records_for_object(object_id: int, only_open: bool = True) -> list[dict]:
-    cond = "AND status NOT IN ('superseded', 'rejected', 'done', 'closed')" if only_open else ""
+    cond = "AND status NOT IN ('superseded', 'rejected', 'done', 'closed', 'cancelled')" if only_open else ""
     return await fetchall(
         f"SELECT * FROM records WHERE object_id = ? {cond} ORDER BY id", object_id
     )
@@ -245,9 +336,10 @@ async def agreement_history(object_id: int, topic_key: str) -> list[dict]:
     )
 
 
-async def tasks_for_assignee(name: str) -> list[dict]:
+async def tasks_for_assignee(name: str, user_id: int | None = None, username: str | None = None) -> list[dict]:
     return await fetchall(
         "SELECT r.*, o.name AS object_name FROM records r JOIN objects o ON o.id = r.object_id "
-        "WHERE r.type = 'task' AND r.status IN ('open', 'accepted') AND r.assignee LIKE ? ORDER BY r.due_date",
-        f"%{name}%",
+        "WHERE r.type = 'task' AND r.status IN ('open', 'accepted') "
+        "AND (r.assignee LIKE ? OR r.assignee_user_id = ? OR (? != '' AND lower(r.assignee) = ?)) ORDER BY r.due_date",
+        f"%{name}%", str(user_id or ""), (username or "").lower(), f"@{(username or '').lower()}",
     )
