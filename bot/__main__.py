@@ -6,7 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
-from . import db, digest
+from . import clarify, db, digest
 from .config import config
 from .handlers import router
 
@@ -22,8 +22,10 @@ async def main() -> None:
         BotCommand(command="my", description="Мои задачи"),
         BotCommand(command="digest", description="Сводка (руководитель)"),
         BotCommand(command="setup", description="Привязать чат к объекту"),
+        BotCommand(command="object", description="Профиль объекта"),
     ])
     asyncio.create_task(digest.scheduler(bot))
+    asyncio.create_task(clarify.expire_loop(bot))
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

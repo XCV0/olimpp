@@ -9,7 +9,23 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS objects (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    chat_id INTEGER UNIQUE NOT NULL
+    chat_id INTEGER UNIQUE NOT NULL,
+    address TEXT,
+    description TEXT          -- что за объект: квартира/дом/офис, какие работы, клиент
+);
+-- вопросы бота в чате, когда человеку не хватило данных
+CREATE TABLE IF NOT EXISTS clarifications (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    object_id INTEGER NOT NULL,
+    record_id INTEGER,         -- NULL для вопроса о профиле объекта
+    kind TEXT NOT NULL,        -- record / object
+    question TEXT NOT NULL,
+    ask_message_id INTEGER,    -- сообщение бота с вопросом
+    source_message_id INTEGER, -- сообщение, к которому вопрос
+    author_id INTEGER,         -- у кого спрашиваем
+    status TEXT DEFAULT 'open',-- open / answered / dismissed / expired
+    created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -59,6 +75,12 @@ async def connect() -> None:
     _db = await aiosqlite.connect(config.db_path)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
+    # миграция баз, созданных до появления профиля объекта
+    for col in ("address", "description"):
+        try:
+            await _db.execute(f"ALTER TABLE objects ADD COLUMN {col} TEXT")
+        except aiosqlite.OperationalError:
+            pass
     await _db.commit()
 
 
@@ -101,6 +123,15 @@ async def bind_chat(chat_id: int, name: str) -> None:
 
 async def object_by_chat(chat_id: int) -> dict | None:
     return await fetchone("SELECT * FROM objects WHERE chat_id = ?", chat_id)
+
+
+async def update_object(object_id: int, **fields) -> None:
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    await execute(f"UPDATE objects SET {sets} WHERE id = ?", *fields.values(), object_id)
+
+
+async def get_object(object_id: int) -> dict | None:
+    return await fetchone("SELECT * FROM objects WHERE id = ?", object_id)
 
 
 async def all_objects() -> list[dict]:

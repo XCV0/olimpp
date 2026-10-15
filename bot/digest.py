@@ -20,7 +20,7 @@ async def build_digest() -> str:
     now = datetime.now(timezone.utc)
     today = now.astimezone(config.tz).date().isoformat()
     blocks = {"⚡ Спорное": [], "🟡 Ждут подтверждения клиента": [], "⏳ Просроченные задачи": [],
-              "⚠️ Открытые проблемы": [], "❓ Вопросы без ответа": [], "💤 Тихие объекты": []}
+              "⚠️ Открытые проблемы": [], "❓ Вопросы без ответа": [], "🤷 Не уточнено": [], "💤 Тихие объекты": []}
 
     for obj in await db.all_objects():
         for r in await db.records_for_object(obj["id"]):
@@ -33,6 +33,8 @@ async def build_digest() -> str:
                 blocks["⏳ Просроченные задачи"].append(line)
             elif r["type"] == "problem":
                 blocks["⚠️ Открытые проблемы"].append(line)
+            elif "не уточнено" in (r["note"] or ""):
+                blocks["🤷 Не уточнено"].append(line + f"\n   <i>{esc(r['note'])}</i>")
             elif r["type"] == "question" and \
                     now - datetime.fromisoformat(r["created_at"]) > timedelta(hours=QUESTION_STALE_HOURS):
                 blocks["❓ Вопросы без ответа"].append(line)

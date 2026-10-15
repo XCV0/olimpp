@@ -1,17 +1,17 @@
 """Конвейер: сообщение → нормализация → (быстрые правила | LLM) → записи → реакция и сигналы."""
 
-import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.types import (
     Message, MessageOriginChannel, MessageOriginChat, MessageOriginHiddenUser,
-    MessageOriginUser, ReactionTypeEmoji, ReplyParameters,
+    MessageOriginUser, ReactionTypeEmoji,
 )
 
-from . import db, llm, notify
-from .formatting import esc, link, message_for_llm, record_for_llm, record_line
+from . import clarify, db, files, llm, notify
+from .formatting import esc, link, message_for_llm, object_for_llm, record_for_llm, record_line
 
 log = logging.getLogger(__name__)
 
@@ -112,15 +112,15 @@ def _new_record(msg: dict, obj: dict, item: dict, confidence: str, note: str | N
     )
 
 
-async def _apply_agreement(bot: Bot, obj: dict, rec: dict) -> str:
+async def _apply_agreement(bot: Bot, obj: dict, rec: dict) -> tuple[str, int]:
     old = await db.active_agreement(obj["id"], rec["topic_key"]) if rec["topic_key"] else None
 
     if old and old["value"].strip().lower() == rec["value"].strip().lower():
         # то же самое решение: возможно, пришло подтверждение
         if rec["confidence"] == "confirmed" and old["confidence"] != "confirmed":
             await db.update_record(old["id"], confidence="confirmed", note=rec["note"])
-            return "✍"
-        return "✍" if old["confidence"] == "confirmed" else "🤔"
+            return "✍", old["id"]
+        return ("✍" if old["confidence"] == "confirmed" else "🤔"), old["id"]
 
     if old and old["confidence"] == "confirmed" and rec["confidence"] != "confirmed":
         # пересказ не может перебить подтверждённое — это конфликт
@@ -134,7 +134,7 @@ async def _apply_agreement(bot: Bot, obj: dict, rec: dict) -> str:
             f"Подтвердить новую версию?",
             notify.decision_kb(rid),
         )
-        return "⚡"
+        return "⚡", rid
 
     rid = await db.add_record(**rec, supersedes=old["id"] if old else None)
     if old:
@@ -147,65 +147,92 @@ async def _apply_agreement(bot: Bot, obj: dict, rec: dict) -> str:
             # TODO: искать в чате действия по старой версии («привезли», «начали укладку»)
             notify.decision_kb(rid),
         )
-        return "⚡"
-    return "✍" if rec["confidence"] == "confirmed" else "🤔"
+        return "⚡", rid
+    return ("✍" if rec["confidence"] == "confirmed" else "🤔"), rid
 
 
-async def _clarify_date(bot: Bot, msg: dict, problem: str) -> None:
-    sent = await bot.send_message(
-        msg["chat_id"], f"🤔 Уточните дату: {esc(problem)}", reply_parameters=ReplyParameters(message_id=msg["message_id"])
-    )
-    await asyncio.sleep(600)  # уточнение не висит в чате
-    try:
-        await bot.delete_message(msg["chat_id"], sent.message_id)
-    except Exception:
-        pass
-
-
-async def process(bot: Bot, m: Message, obj: dict) -> None:
+async def process(bot: Bot, m: Message, obj: dict, strip: str | None = None, addressed: bool = False) -> dict:
+    """Возвращает {"records": записи из этого сообщения, "closed": закрытые им записи,
+    "clarified": запись или объект, если сообщение оказалось ответом на вопрос бота}."""
     msg = normalize(m)
+    if strip:
+        msg["text"] = re.sub(re.escape(strip), "", msg["text"], flags=re.IGNORECASE).strip()
+    doc_text = None
+    if m.document:
+        doc_text = await files.read_document(bot, m.document)
+        if doc_text:
+            # текст файла хранится вместе с сообщением — по нему потом работают поиск и вопросы
+            msg["text"] = f"{msg['text']}\n[Файл «{m.document.file_name}»]:\n{doc_text}".strip()
     await db.save_message(msg)
 
+    # сначала — не ответ ли это на уточняющий вопрос бота
+    if msg["text"].strip():
+        clar = await clarify.find_for_answer(msg)
+        if clar:
+            updated = await clarify.resolve(bot, clar, msg)
+            if updated:
+                await _react(bot, msg, "✍")
+                return {"records": [], "closed": [], "clarified": updated, "clar_kind": clar["kind"],
+                        "document": doc_text}
+
     reactions: list[str] = []
+    closed: list[dict] = []
     quick = await _quick_rules(msg, obj)
     if quick:
         reactions.append(quick)
     elif msg["text"].strip() and len(msg["text"].strip()) > 2:
-        context = [message_for_llm(x) for x in await db.recent_messages(msg["chat_id"], 21)
+        # в контексте старые сообщения обрезаем: там могут быть целые документы
+        context = [message_for_llm(x)[:600] for x in await db.recent_messages(msg["chat_id"], 21)
                    if x["message_id"] != msg["message_id"]][-20:]
         records = await db.records_for_object(obj["id"])
         result = await llm.extract(
-            message_for_llm(msg), "\n".join(context), "\n".join(record_for_llm(r) for r in records)
+            message_for_llm(msg), "\n".join(context), "\n".join(record_for_llm(r) for r in records),
+            object_for_llm(obj), addressed=addressed,
         )
-        reactions += await _apply(bot, msg, obj, result)
+        new_reactions, closed = await _apply(bot, msg, obj, result)
+        reactions += new_reactions
 
     if reactions:
-        best = min(reactions, key=REACTION_PRIORITY.index)
-        try:
-            await bot.set_message_reaction(msg["chat_id"], msg["message_id"], [ReactionTypeEmoji(emoji=best)])
-        except Exception as e:
-            log.warning("реакция не поставлена: %s", e)
+        await _react(bot, msg, min(reactions, key=REACTION_PRIORITY.index))
+    return {"records": await db.records_by_message(msg["chat_id"], msg["message_id"]), "closed": closed,
+            "document": doc_text}
 
 
-async def _apply(bot: Bot, msg: dict, obj: dict, result: dict) -> list[str]:
-    reactions = []
+async def _react(bot: Bot, msg: dict, emoji: str) -> None:
+    try:
+        await bot.set_message_reaction(msg["chat_id"], msg["message_id"], [ReactionTypeEmoji(emoji=emoji)])
+    except Exception as e:
+        log.warning("реакция не поставлена: %s", e)
+
+
+async def _apply(bot: Bot, msg: dict, obj: dict, result: dict) -> tuple[list[str], list[dict]]:
+    reactions, closed = [], []
+    asked = False  # не больше одного вопроса на сообщение
     for item in result.get("items", []):
         if item.get("type") not in ("agreement", "task", "problem", "question"):
             continue
-        if item.get("confidence") == "discussion":
-            continue  # предположения в базу не пишем, они остаются в истории сообщений
+        if item["type"] == "agreement" and item.get("confidence") == "discussion":
+            continue  # предположения в договорённости не пишем, они остаются в истории сообщений
         conf, note = await _trusted_confidence(msg, item.get("confidence", "reported"))
         if item.get("date_problem"):
             note = f"{note + '; ' if note else ''}дата: {item['date_problem']}"
-            asyncio.create_task(_clarify_date(bot, msg, item["date_problem"]))
-            reactions.append("🤔")
         rec = _new_record(msg, obj, item, conf, note)
 
         if item["type"] == "agreement":
-            reactions.append(await _apply_agreement(bot, obj, rec))
+            reaction, rid = await _apply_agreement(bot, obj, rec)
+            reactions.append(reaction)
         else:
             rid = await db.add_record(**rec)
             reactions.append("👀")
+
+        question = item.get("ask")
+        if question and not asked and item["type"] != "question" and (item.get("missing") or item.get("date_problem")):
+            asked = await clarify.ask(
+                bot, chat_id=msg["chat_id"], object_id=obj["id"], source_message_id=msg["message_id"],
+                author_id=msg["user_id"], question=question, record_id=rid,
+            )
+            if asked:
+                reactions.append("🤔")
             if item["type"] == "problem":
                 await notify.to_managers(
                     bot, f"⚠️ <b>{esc(obj['name'])}: проблема</b>\n{record_line(await db.get_record(rid))}"
@@ -217,8 +244,9 @@ async def _apply(bot: Bot, msg: dict, obj: dict, result: dict) -> list[str]:
         if not r or r["object_id"] != obj["id"] or r["type"] not in ("task", "question"):
             continue
         await db.update_record(r["id"], status="done" if r["type"] == "task" else "closed")
+        closed.append(r)
         reactions.append("👀")
-    return reactions
+    return reactions, closed
 
 
 async def process_edit(bot: Bot, m: Message, obj: dict) -> None:

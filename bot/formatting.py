@@ -6,17 +6,31 @@ from .config import config
 
 CONF_ICON = {"confirmed": "🟢", "reported": "🟡", "discussion": "⚪", "conflict": "🔴"}
 TYPE_NAME = {"agreement": "Договорённость", "task": "Задача", "problem": "Проблема", "question": "Вопрос"}
+# у задач, проблем и вопросов значок показывает статус, у договорённостей — достоверность
+STATUS_ICON = {
+    "task": {"done": "✅", "accepted": "🔵", "open": "⚪"},
+    "problem": {"open": "⚠️", "closed": "✅"},
+    "question": {"open": "❓", "closed": "✅"},
+}
+STATUS_NAME = {
+    "done": "выполнена", "accepted": "в работе", "open": "открыта", "closed": "закрыта",
+    "active": "актуальна", "superseded": "заменена", "rejected": "отклонена", "disputed": "спорная",
+}
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-def msg_link(chat_id: int, message_id: int) -> str:
-    # ссылки t.me/c/... работают только для супергрупп (id вида -100XXXXXXXXXX)
-    internal = str(chat_id).removeprefix("-100")
-    return f"https://t.me/c/{internal}/{message_id}"
+def msg_link(chat_id: int, message_id: int) -> str | None:
+    # ссылки t.me/c/... существуют только у супергрупп (id вида -100XXXXXXXXXX);
+    # у обычной группы ссылки на сообщение нет вообще — тогда показываем /src
+    s = str(chat_id)
+    if not s.startswith("-100"):
+        return None
+    return f"https://t.me/c/{s.removeprefix('-100')}/{message_id}"
 
 
 def link(r: dict, text: str = "сообщение") -> str:
-    return f'<a href="{msg_link(r["chat_id"], r["message_id"])}">{text}</a>'
+    url = msg_link(r["chat_id"], r["message_id"])
+    return f'<a href="{url}">{text}</a>' if url else f"📎 /src_{r['id']}"
 
 
 def esc(s: str | None) -> str:
@@ -31,9 +45,27 @@ def short_date(iso: str) -> str:
     return local_dt(iso).strftime("%d.%m %H:%M")
 
 
+def is_overdue(r: dict) -> bool:
+    today = datetime.now(config.tz).date().isoformat()
+    return r["type"] == "task" and r["status"] in ("open", "accepted") \
+        and bool(r.get("due_date")) and r["due_date"] < today
+
+
+def icon(r: dict) -> str:
+    if is_overdue(r):
+        return "🔴"
+    if r["type"] in STATUS_ICON:
+        return STATUS_ICON[r["type"]].get(r["status"], "")
+    return CONF_ICON.get(r["confidence"], "")
+
+
+def status_text(r: dict) -> str:
+    return "просрочена" if is_overdue(r) else STATUS_NAME.get(r["status"], r["status"])
+
+
 def record_line(r: dict, with_object: str | None = None) -> str:
-    icon = CONF_ICON.get(r["confidence"], "")
-    parts = [f"{icon} <b>{esc(r['title'])}</b>: {esc(r['value'])}"]
+    icon_ = icon(r)
+    parts = [f"{icon_} <b>{esc(r['title'])}</b>: {esc(r['value'])}"]
     if r.get("assignee"):
         parts.append(f"👤 {esc(r['assignee'])}")
     if r.get("due_date"):
@@ -46,7 +78,8 @@ def record_line(r: dict, with_object: str | None = None) -> str:
 def record_for_llm(r: dict) -> str:
     """Плоская строка для контекста LLM."""
     bits = [
-        f"#{r['id']}", r["type"], f"тема={r['topic_key'] or '-'}", f"статус={r['status']}",
+        f"#{r['id']}", f"значок={icon(r)}", r["type"], f"тема={r['topic_key'] or '-'}",
+        f"статус={status_text(r)}",
         f"достоверность={r['confidence']}", f"«{r['title']}: {r['value']}»",
         f"автор={r['author_name']}", f"дата={r['created_at'][:16]}",
     ]
@@ -69,12 +102,23 @@ def message_for_llm(m: dict) -> str:
     return f"{head}: {m['text'] or '(без текста)'}"
 
 
-def linkify_ids(text: str, records: dict[int, dict]) -> str:
-    """Заменяет [#12] в ответе LLM на ссылку на исходное сообщение. Текст LLM экранируется."""
+def linkify_ids(text: str, records: dict[int, dict]) -> tuple[str, list[int]]:
+    """Заменяет [#12] в ответе LLM на ссылку на исходное сообщение. Текст LLM экранируется.
+    Возвращает текст и id упомянутых записей (для кнопок «📎 исходное»)."""
     text = esc(text)
+    used: list[int] = []
 
     def repl(match: re.Match) -> str:
         r = records.get(int(match.group(1)))
-        return link(r, "↗ источник") if r else ""
+        if not r:
+            return ""
+        if r["id"] not in used:
+            used.append(r["id"])
+        return link(r, "↗ источник")
 
-    return re.sub(r"\[#(\d+)\]", repl, text)
+    return re.sub(r"\[#(\d+)\]", repl, text), used
+
+
+def object_for_llm(obj: dict) -> str:
+    return (f"название={obj['name']} | адрес={obj.get('address') or 'не указан'} | "
+            f"описание={obj.get('description') or 'не указано'}")

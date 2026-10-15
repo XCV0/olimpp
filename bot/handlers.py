@@ -1,12 +1,13 @@
 import logging
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
 
-from . import db, digest, llm, pipeline
-from .formatting import esc, linkify_ids, record_for_llm, record_line
+from . import clarify, db, digest, files, llm, pipeline
+from .formatting import TYPE_NAME, esc, linkify_ids, object_for_llm, record_for_llm, record_line
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -20,8 +21,9 @@ HELP = (
     "/digest — сводка сейчас · /objects — подключённые объекты\n\n"
     "<b>В чате объекта:</b>\n"
     "/setup Название — привязать чат к объекту (только руководитель)\n"
-    "/brief — что решено по объекту · /my — мои задачи\n"
-    "@бот вопрос — ответ по этому объекту"
+    "/brief — что решено по объекту · /my — мои задачи · /object — профиль объекта\n"
+    "@бот вопрос — ответ по этому объекту\n"
+    "/src_12 — показать исходное сообщение записи №12"
 )
 
 
@@ -74,20 +76,71 @@ async def private_question(m: Message):
     if not objects:
         return await m.answer("Нет объектов, по которым я могу ответить.")
     await m.bot.send_chat_action(m.chat.id, "typing")
-    await m.answer(await _answer(m.text, objects))
+    text, kb = await _answer(m.text, objects)
+    await m.answer(text, reply_markup=kb)
 
 
-async def _answer(question: str, objects: list[dict]) -> str:
+def sources_kb(ids: list[int]) -> InlineKeyboardMarkup | None:
+    if not ids:
+        return None
+    buttons = [InlineKeyboardButton(text=f"📎 #{i}", callback_data=f"src:{i}") for i in ids[:9]]
+    return InlineKeyboardMarkup(inline_keyboard=[buttons[i:i + 3] for i in range(0, len(buttons), 3)])
+
+
+async def _can_see(user_id: int, r: dict) -> bool:
+    if await db.is_manager(user_id):
+        return True
+    row = await db.fetchone(
+        "SELECT 1 FROM messages WHERE chat_id = ? AND user_id = ? LIMIT 1", r["chat_id"], user_id
+    )
+    return row is not None
+
+
+async def send_source(bot: Bot, user_id: int, target_chat_id: int, record_id: int) -> str | None:
+    """Показывает исходное сообщение записи. Работает и в обычных группах, где ссылок нет:
+    в том же чате — ответ на оригинал, в другом чате — пересылка оригинала. Возвращает ошибку или None."""
+    r = await db.get_record(record_id)
+    if not r or not await _can_see(user_id, r):
+        return "Запись не найдена"
+    try:
+        if target_chat_id == r["chat_id"]:
+            await bot.send_message(target_chat_id, "👆 Исходное сообщение",
+                                   reply_parameters=ReplyParameters(message_id=r["message_id"]))
+        else:
+            await bot.forward_message(target_chat_id, r["chat_id"], r["message_id"])
+    except Exception as e:
+        log.warning("не смог показать источник #%s: %s", record_id, e)
+        return "Исходное сообщение удалено или недоступно боту"
+    return None
+
+
+@router.message(F.text.regexp(r"^/src(?:_|\s+)(\d+)"))
+async def cmd_src(m: Message, bot: Bot):
+    record_id = int(m.text.split("@")[0].replace("_", " ").split()[1])
+    err = await send_source(bot, m.from_user.id, m.chat.id, record_id)
+    if err:
+        await m.reply(err)
+
+
+@router.callback_query(F.data.regexp(r"^src:\d+$"))
+async def cb_src(c: CallbackQuery, bot: Bot):
+    err = await send_source(bot, c.from_user.id, c.message.chat.id, int(c.data.split(":")[1]))
+    await c.answer(err or "")
+
+
+async def _answer(question: str, objects: list[dict], attached: str = "") -> tuple[str, InlineKeyboardMarkup | None]:
     records: dict[int, dict] = {}
     lines = []
     for o in objects:
+        lines.append(f"[{o['name']}] ОБЪЕКТ: {object_for_llm(o)}")
         # с историей версий, чтобы бот мог показать «было → стало»
         for r in await db.records_for_object(o["id"], only_open=False):
             records[r["id"]] = r
             lines.append(f"[{o['name']}] {record_for_llm(r)}")
     # TODO: при росте базы — предварительный отбор записей поиском, а не все подряд
-    reply = await llm.answer(question, "\n".join(lines[-400:]) or "записей нет")
-    return linkify_ids(reply, records)
+    reply = await llm.answer(question, "\n".join(lines[-400:]) or "записей нет", attached)
+    text, used = linkify_ids(reply, records)
+    return text, sources_kb(used)
 
 
 # ---------- кнопки руководителя ----------
@@ -124,6 +177,13 @@ async def added_to_group(m: Message, bot: Bot):
                        "Для работы мне нужны права администратора.")
 
 
+@router.message(GROUPS, F.migrate_to_chat_id)
+async def migrated(m: Message):
+    # обычная группа превратилась в супергруппу: у неё новый id, и с этого момента работают ссылки
+    await db.execute("UPDATE objects SET chat_id = ? WHERE chat_id = ?", m.migrate_to_chat_id, m.chat.id)
+    log.info("чат %s мигрировал в супергруппу %s", m.chat.id, m.migrate_to_chat_id)
+
+
 @router.message(Command("setup"), GROUPS)
 async def cmd_setup(m: Message, command: CommandObject):
     if not await db.is_manager(m.from_user.id):
@@ -137,6 +197,34 @@ async def cmd_setup(m: Message, command: CommandObject):
         "Скрины и пересылки переписки с клиентом присылайте сюда — так решения будут подтверждёнными.\n"
         "Чтобы я мог писать вам лично — нажмите /start у меня в личке."
     )
+    obj = await db.object_by_chat(m.chat.id)
+    if not obj["address"] or not obj["description"]:
+        await _ask_object(m, obj)
+
+
+async def _ask_object(m: Message, obj: dict) -> None:
+    await clarify.ask(
+        m.bot, chat_id=m.chat.id, object_id=obj["id"], source_message_id=m.message_id,
+        author_id=m.from_user.id, kind="object",
+        question="Какой адрес у объекта и что это за объект? (квартира / дом / офис, какие работы, клиент)",
+    )
+
+
+@router.message(Command("object"), GROUPS)
+async def cmd_object(m: Message):
+    obj = await db.object_by_chat(m.chat.id)
+    if not obj:
+        return
+    await m.reply(f"<b>{esc(obj['name'])}</b>\n📍 {esc(obj['address']) or 'адрес не указан'}\n"
+                  f"🏠 {esc(obj['description']) or 'описание не указано'}")
+    if not obj["address"] or not obj["description"]:
+        await _ask_object(m, obj)
+
+
+@router.callback_query(F.data.regexp(r"^clar_skip:\d+$"))
+async def cb_clar_skip(c: CallbackQuery, bot: Bot):
+    await clarify.dismiss(bot, int(c.data.split(":")[1]))
+    await c.answer("Ок, пропускаю")
 
 
 @router.message(Command("brief"), GROUPS)
@@ -161,13 +249,71 @@ async def group_message(m: Message, bot: Bot):
         return
     await db.upsert_user(m.from_user.id, m.from_user.full_name)
 
-    if await _is_addressed(m, bot):
-        me = await bot.me()
-        question = (m.text or "").replace(f"@{me.username}", "").strip()
-        # только данные этого объекта — другие объекты в контекст не попадают вообще
-        await m.reply(await _answer(question, [obj]))
+    me = await bot.me()
+    addressed = await _is_addressed(m, bot)
+    # любое сообщение, в т.ч. обращение к боту, идёт через конвейер извлечения
+    result = await pipeline.process(bot, m, obj, strip=f"@{me.username}", addressed=addressed)
+    # ответ на уточняющий вопрос: запись дополнена, вопрос удалён, реакция ✍ — больше ничего не пишем
+    if not addressed or result.get("clarified"):
         return
-    await pipeline.process(bot, m, obj)
+
+    # вопрос к самому боту — не «открытый вопрос» чата, его не храним, а отвечаем
+    for r in result["records"]:
+        if r["type"] == "question":
+            await db.execute("DELETE FROM records WHERE id = ?", r["id"])
+    saved = [r for r in result["records"] if r["type"] != "question"]
+
+    lines = [f"{TYPE_NAME[r['type']]} — {record_line(r)}" for r in saved]
+    lines += [f"✅ Закрыто: {esc(r['title'])}" for r in result["closed"]]
+    recorded = ("Записал:\n" + "\n".join(lines)) if lines else ""
+
+    # документ в этом сообщении или в сообщении, на которое ответили, — вопрос про него
+    attached = result.get("document") or ""
+    rm = m.reply_to_message
+    if not attached and rm and not (rm.from_user and rm.from_user.id == me.id):
+        attached = await _replied_content(bot, m.chat.id, rm)
+
+    if recorded and not attached:
+        await m.reply(recorded)
+        return
+    question = re.sub(re.escape(f"@{me.username}"), "", m.text or m.caption or "", flags=re.IGNORECASE).strip()
+    # только данные этого объекта — другие объекты в контекст не попадают вообще
+    text, kb = await _answer(question, [obj], attached)
+    if recorded:
+        text += "\n\n" + recorded
+    await _reply_long(m, text, kb)
+
+
+async def _replied_content(bot: Bot, chat_id: int, rm: Message) -> str:
+    """Текст сообщения, на которое ответили. Если это файл, а бот его не сохранил
+    (например, был выключен, когда файл прислали) — скачиваем и читаем сейчас."""
+    saved = await db.get_message(chat_id, rm.message_id)
+    if saved and (not rm.document or "[Файл «" in (saved["text"] or "")):
+        return saved["text"] or ""
+    text = rm.text or rm.caption or ""
+    if rm.document:
+        doc = await files.read_document(bot, rm.document)
+        if doc:
+            text = f"{text}\n[Файл «{rm.document.file_name}»]:\n{doc}".strip()
+            if saved:
+                await db.execute("UPDATE messages SET text = ? WHERE chat_id = ? AND message_id = ?",
+                                 text, chat_id, rm.message_id)
+        elif not files.supported(rm.document):
+            text += f"\n[Файл «{rm.document.file_name}» — формат не поддерживается]"
+    return text
+
+
+async def _reply_long(m: Message, text: str, kb: InlineKeyboardMarkup | None) -> None:
+    """Telegram режет сообщения на 4096 символов — делим по строкам, кнопки к последнему куску."""
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 4000 and cur:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    chunks.append(cur)
+    for i, chunk in enumerate(chunks):
+        await m.reply(chunk, reply_markup=kb if i == len(chunks) - 1 else None)
 
 
 @router.edited_message(GROUPS)
