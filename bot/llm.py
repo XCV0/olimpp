@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 
-from openai import APIStatusError, AsyncOpenAI, RateLimitError
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, RateLimitError
 
 from .config import config
 
@@ -18,6 +18,8 @@ _client = (
         api_key=config.llm_key,
         base_url=config.llm_base_url,
         default_headers={"X-Title": "Prorab-pamyat bot"},
+        timeout=45,
+        max_retries=1,
     )
     if config.llm_key
     else None
@@ -109,10 +111,24 @@ async def _chat(system: str, user: str, json_mode: bool) -> str | None:
     if _client is None:
         log.warning("OPENROUTER_API_KEY не задан — LLM пропущен")
         return None
-    for attempt in range(3):
+    models = [config.llm_model] + ([config.llm_fallback_model] if config.llm_fallback_model else [])
+    for i, model in enumerate(models):
+        try:
+            return await _call(model, system, user, json_mode)
+        except (APIConnectionError, RateLimitError, APIStatusError) as e:
+            # сеть, перегрузка или ошибка провайдера — пробуем запасную модель
+            # неверный ключ (401/403) запасная модель не спасёт, остальное — пробуем
+            retryable = not (isinstance(e, APIStatusError) and e.status_code in (401, 403))
+            if i == len(models) - 1 or not retryable:
+                raise
+            log.warning("модель %s недоступна (%s), переключаюсь на %s", model, type(e).__name__, models[i + 1])
+
+
+async def _call(model: str, system: str, user: str, json_mode: bool) -> str | None:
+    for attempt in range(2):
         try:
             resp = await _client.chat.completions.create(
-                model=config.llm_model,
+                model=model,
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 response_format={"type": "json_object"} if json_mode else None,
                 temperature=0.1,
@@ -121,9 +137,9 @@ async def _chat(system: str, user: str, json_mode: bool) -> str | None:
             )
             return resp.choices[0].message.content
         except RateLimitError:
-            if attempt == 2:
+            if attempt == 1:
                 raise
-            await asyncio.sleep(2 * (attempt + 1))  # модель временно перегружена у провайдера
+            await asyncio.sleep(2)  # модель временно перегружена у провайдера
 
 
 MERGE_SYSTEM = """Бот задал сотруднику уточняющий вопрос по записи, человек что-то ответил.
@@ -186,9 +202,12 @@ async def answer(question: str, records_block: str, attached: str = "") -> str:
         log.error("answer failed: %s", e)
         if e.status_code == 402:
             return "Не могу ответить: закончился баланс OpenRouter, нужно пополнить ключ."
-        if e.status_code == 429:
+        if e.status_code in (429, 408) or e.status_code >= 500:
             return "Модель сейчас перегружена, попробуйте через минуту."
         raw = None
+    except APIConnectionError as e:
+        log.error("answer failed: %s", e)
+        return "Нет связи с моделью, попробуйте через минуту."
     except Exception:
         log.exception("answer failed")
         raw = None
